@@ -13,6 +13,11 @@ const io = new Server(server, {
 
 const rooms = {};
 
+// Renderスリープ対策のヘルスチェック用
+app.get('/ping', (req, res) => {
+    res.status(200).send('pong');
+});
+
 function judgeChinchiro(dice) {
     const sorted = [...dice].sort((a, b) => a - b);
     
@@ -39,12 +44,11 @@ function judgeChinchiro(dice) {
     return { rank: 2, name: '目なし', multiplier: 0, score: 0 };
 }
 
-// 借金に応じた強制称号の適用
 function applyForcedTitles(room) {
     room.players.forEach(p => {
         if (p.chips < 0) {
             p.isForcedTitle = true;
-            p.titleColor = '#ff3366'; // 赤
+            p.titleColor = '#ff3366';
             if (p.chips <= -50000) {
                 p.title = '[臓器の未来を担保にした男]';
             } else if (p.chips <= -10000) {
@@ -349,7 +353,6 @@ io.on('connection', (socket) => {
             w.player.chipDiff += share;
         });
 
-        // 終了後に称号を強制適用
         applyForcedTitles(room);
 
         room.roundSummary = {
