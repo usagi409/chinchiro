@@ -48,7 +48,7 @@ io.on('connection', (socket) => {
         rooms[roomId] = {
             host: socket.id,
             gameMaster: socket.id,
-            minBet: 100, // 胴元が設定する最低賭け金
+            minBet: 100,
             currentTurnIndex: 0,
             turnsPlayed: 0,
             players: [{
@@ -119,7 +119,6 @@ io.on('connection', (socket) => {
         if (!room || room.host !== socket.id || room.status === 'playing') return;
         
         room.minBet = Math.max(1, parseInt(minBet) || 100);
-        // 全員の掛け金が新しい最低賭け金を下回っていたら引き上げる
         room.players.forEach(p => {
             if (p.bet < room.minBet) {
                 p.bet = room.minBet;
@@ -249,6 +248,20 @@ io.on('connection', (socket) => {
             };
         });
 
+        // 1. 基本ポット（全員の初期賭け金の合計）
+        let totalPot = room.players.reduce((sum, p) => sum + p.bet, 0);
+
+        // 2. ヒフミのペナルティ修正（「2倍負け」＝初期拠出1倍 ＋ 追加1倍で合計2倍にする）
+        evaluated.forEach(e => {
+            if (e.isHifumi) {
+                const extraPenalty = e.player.bet; // 追加で1倍分を徴収
+                e.player.chips -= extraPenalty;
+                e.player.chipDiff -= extraPenalty;
+                totalPot += extraPenalty; // ペナルティ分もポットに合算
+            }
+        });
+
+        // 3. 勝者の決定
         let maxRank = -999;
         let maxScore = -999;
         evaluated.forEach(e => {
@@ -276,30 +289,22 @@ io.on('connection', (socket) => {
             winners = topCandidates;
         }
 
-        evaluated.forEach(e => {
-            if (e.isHifumi) {
-                const penalty = e.player.bet * 2;
-                e.player.chips -= penalty;
-                e.player.chipDiff -= penalty;
-            }
-        });
+        // 4. 勝者の最大倍率を取得
+        const winnerMult = winners[0] && winners[0].multiplier > 0 ? winners[0].multiplier : 1;
 
-        let totalPot = room.players.reduce((sum, p) => sum + p.bet, 0);
-        const winnerMult = winners[0] ? winners[0].multiplier : 1;
-        
-        let additionalCollected = 0;
+        // 5. 敗者からの追加倍率徴収（シゴロやゾロ目などの倍率に応じてポットが肥大化する）
         evaluated.forEach(e => {
             const isWinner = winners.some(w => w.player.id === e.player.id);
             if (!isWinner && winnerMult > 1) {
                 const extra = e.player.bet * (winnerMult - 1);
                 e.player.chips -= extra;
                 e.player.chipDiff -= extra;
-                additionalCollected += extra;
+                totalPot += extra; // 敗者からの追加徴収をポットに全額上乗せ
             }
         });
 
-        const finalPot = totalPot + additionalCollected;
-        const share = Math.floor(finalPot / winners.length);
+        // 6. ポットの分配（勝者で山分け）
+        const share = Math.floor(totalPot / winners.length);
 
         winners.forEach(w => {
             w.player.chips += share;
@@ -308,7 +313,7 @@ io.on('connection', (socket) => {
 
         room.roundSummary = {
             winnerNames: winners.map(w => `${w.player.name} (${w.player.lastResult.name})`).join(', '),
-            totalPot: finalPot,
+            totalPot: totalPot,
             resultsDetail: room.players.map(p => ({
                 name: p.name,
                 dice: p.lastDice,
