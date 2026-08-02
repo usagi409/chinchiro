@@ -83,6 +83,7 @@ io.on('connection', (socket) => {
             minBet: 100,
             currentTurnIndex: 0,
             turnsPlayed: 0,
+            totalPot: 0,
             players: [{
                 id: socket.id,
                 name: userName,
@@ -206,15 +207,15 @@ io.on('connection', (socket) => {
         const gmIndex = room.players.findIndex(p => p.id === room.gameMaster);
         room.currentTurnIndex = gmIndex !== -1 ? gmIndex : 0;
         room.turnsPlayed = 0;
-        
         room.totalPot = 0;
+        
         room.players.forEach(p => {
             p.failCount = 0;
             p.lastDice = null;
             p.lastResult = null;
             p.chipDiff = -p.bet;
             p.chips -= p.bet;
-            room.totalPot += p.bet; // 全員の基本ベットをポットに集約
+            room.totalPot += p.bet; // ベットをポットに集約
         });
 
         applyForcedTitles(room);
@@ -222,8 +223,7 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('game-started', {
             currentTurnId: room.players[room.currentTurnIndex].id,
             gameMasterId: room.gameMaster,
-            players: room.players,
-            totalPot: room.totalPot
+            players: room.players
         });
     });
 
@@ -260,8 +260,7 @@ io.on('connection', (socket) => {
                     isFinished: false,
                     nextTurnId: currentPlayer.id,
                     nextTurnName: currentPlayer.name,
-                    players: room.players,
-                    totalPot: room.totalPot
+                    players: room.players
                 });
                 return;
             }
@@ -271,16 +270,15 @@ io.on('connection', (socket) => {
         currentPlayer.lastDice = dice;
         currentPlayer.lastResult = result;
 
-        // 【即時変動システム】出目に応じた即時ペナルティ・ボーナス処理
+        // --- 賭け金に影響のある目が出たときの即時変動処理 ---
         if (result.rank === 1) {
-            // ヒフミ：追加でベット分を即時没収（ポットに加算）
+            // ヒフミ：追加ペナルティを即時徴収
             const penalty = currentPlayer.bet;
             currentPlayer.chips -= penalty;
             currentPlayer.chipDiff -= penalty;
             room.totalPot += penalty;
         } else if (result.multiplier > 1) {
-            // 高倍率役（シゴロ・ゾロ目・ピンゾロ）：倍率に応じた追加ボーナス分を即時ポットからor追加徴収
-            // ここでは簡易的に「倍率 - 1」分の追加ベットを即時ペナルティとしてポットに追加する形にするか、あるいは即時反映
+            // 高倍率の目（シゴロ、ゾロ目、ピンゾロ等）：倍率に応じた追加賭け金の変動・没収または追加拠出
             const extra = currentPlayer.bet * (result.multiplier - 1);
             currentPlayer.chips -= extra;
             currentPlayer.chipDiff -= extra;
@@ -308,7 +306,6 @@ io.on('connection', (socket) => {
             nextTurnId: nextPlayer ? nextPlayer.id : null,
             nextTurnName: nextPlayer ? nextPlayer.name : null,
             players: room.players,
-            totalPot: room.totalPot,
             roundSummary: isFinished ? room.roundSummary : null
         });
     });
@@ -320,6 +317,7 @@ io.on('connection', (socket) => {
                 player: p,
                 rank: r.rank,
                 score: r.score,
+                multiplier: r.multiplier,
                 isHifumi: r.rank === 1
             };
         });
@@ -351,7 +349,7 @@ io.on('connection', (socket) => {
             winners = topCandidates;
         }
 
-        // ラウンド終了時のポット総取り分配
+        // --- ゲーム終了時は総取りポットの配分（総取り処理）のみ行う ---
         const share = Math.floor(room.totalPot / winners.length);
 
         winners.forEach(w => {
@@ -362,7 +360,7 @@ io.on('connection', (socket) => {
         applyForcedTitles(room);
 
         room.roundSummary = {
-            winnerNames: winners.map(w => `${w.player.name} (${w.player.player.lastResult.name})`).join(', '),
+            winnerNames: winners.map(w => `${w.player.name} (${w.player.lastResult.name})`).join(', '),
             totalPot: room.totalPot,
             resultsDetail: room.players.map(p => ({
                 name: p.name,
