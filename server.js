@@ -13,7 +13,6 @@ const io = new Server(server, {
 
 const rooms = {};
 
-// チンチロの役判定ロジック
 function judgeChinchiro(dice) {
     const sorted = [...dice].sort((a, b) => a - b);
     
@@ -40,11 +39,34 @@ function judgeChinchiro(dice) {
     return { rank: 2, name: '目なし', multiplier: 0, score: 0 };
 }
 
+// 借金に応じた強制称号の適用
+function applyForcedTitles(room) {
+    room.players.forEach(p => {
+        if (p.chips < 0) {
+            p.isForcedTitle = true;
+            p.titleColor = '#ff3366'; // 赤
+            if (p.chips <= -50000) {
+                p.title = '[臓器の未来を担保にした男]';
+            } else if (p.chips <= -10000) {
+                p.title = '[闇金の優良顧客]';
+            } else if (p.chips <= -1000) {
+                p.title = '[カタギ崩れ]';
+            } else {
+                p.title = '[借金初心者]';
+            }
+        } else {
+            p.isForcedTitle = false;
+        }
+    });
+}
+
 io.on('connection', (socket) => {
     console.log(`新しい賭博者が接続: ${socket.id}`);
 
-    socket.on('create-room', ({ userName, wallet, bet }) => {
+    socket.on('create-room', ({ userName, wallet, bet, title, titleColor }) => {
         const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
+        const initialChips = wallet !== undefined ? wallet : 1000;
+        
         rooms[roomId] = {
             host: socket.id,
             gameMaster: socket.id,
@@ -54,22 +76,26 @@ io.on('connection', (socket) => {
             players: [{
                 id: socket.id,
                 name: userName,
-                chips: wallet !== undefined ? wallet : 1000,
+                chips: initialChips,
                 role: 'host',
                 failCount: 0,
                 bet: bet !== undefined ? parseInt(bet) || 100 : 100,
                 lastDice: null,
                 lastResult: null,
-                chipDiff: 0
+                chipDiff: 0,
+                title: initialChips < 0 ? '[借金初心者]' : (title || ''),
+                titleColor: initialChips < 0 ? '#ff3366' : (titleColor || '#ffcc00'),
+                isForcedTitle: initialChips < 0
             }],
             status: 'waiting'
         };
+        applyForcedTitles(rooms[roomId]);
 
         socket.join(roomId);
         socket.emit('room-created', { roomId, players: rooms[roomId].players, gameMaster: rooms[roomId].gameMaster, minBet: rooms[roomId].minBet });
     });
 
-    socket.on('join-room', ({ roomId, userName, wallet, bet }) => {
+    socket.on('join-room', ({ roomId, userName, wallet, bet, title, titleColor }) => {
         const room = rooms[roomId];
         if (!room) {
             socket.emit('error-msg', '指定された部屋は見つかりません');
@@ -85,18 +111,23 @@ io.on('connection', (socket) => {
         }
 
         const userBet = Math.max(room.minBet, parseInt(bet) || room.minBet);
+        const initialChips = wallet !== undefined ? wallet : 1000;
 
         room.players.push({
             id: socket.id,
             name: userName,
-            chips: wallet !== undefined ? wallet : 1000,
+            chips: initialChips,
             role: 'guest',
             failCount: 0,
             bet: userBet,
             lastDice: null,
             lastResult: null,
-            chipDiff: 0
+            chipDiff: 0,
+            title: initialChips < 0 ? '[借金初心者]' : (title || ''),
+            titleColor: initialChips < 0 ? '#ff3366' : (titleColor || '#ffcc00'),
+            isForcedTitle: initialChips < 0
         });
+        applyForcedTitles(room);
 
         socket.join(roomId);
         io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
@@ -110,6 +141,17 @@ io.on('connection', (socket) => {
         if (player) {
             const requestedBet = parseInt(bet) || room.minBet;
             player.bet = Math.max(room.minBet, requestedBet);
+            io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
+        }
+    });
+
+    socket.on('update-title', ({ roomId, title, titleColor }) => {
+        const room = rooms[roomId];
+        if (!room) return;
+        const player = room.players.find(p => p.id === socket.id);
+        if (player && player.chips >= 0) {
+            player.title = title || '';
+            player.titleColor = titleColor || '#ffcc00';
             io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
         }
     });
@@ -157,9 +199,11 @@ io.on('connection', (socket) => {
             p.failCount = 0;
             p.lastDice = null;
             p.lastResult = null;
-            p.chipDiff = -p.bet; // 初回拠出分
+            p.chipDiff = -p.bet;
             p.chips -= p.bet; 
         });
+
+        applyForcedTitles(room);
 
         io.to(roomId).emit('game-started', {
             currentTurnId: room.players[room.currentTurnIndex].id,
@@ -248,20 +292,17 @@ io.on('connection', (socket) => {
             };
         });
 
-        // 1. 基本ポット（全員の初期賭け金の合計）
         let totalPot = room.players.reduce((sum, p) => sum + p.bet, 0);
 
-        // 2. ヒフミのペナルティ修正（「2倍負け」＝初期拠出1倍 ＋ 追加1倍で合計2倍にする）
         evaluated.forEach(e => {
             if (e.isHifumi) {
-                const extraPenalty = e.player.bet; // 追加で1倍分を徴収
+                const extraPenalty = e.player.bet;
                 e.player.chips -= extraPenalty;
                 e.player.chipDiff -= extraPenalty;
-                totalPot += extraPenalty; // ペナルティ分もポットに合算
+                totalPot += extraPenalty;
             }
         });
 
-        // 3. 勝者の決定
         let maxRank = -999;
         let maxScore = -999;
         evaluated.forEach(e => {
@@ -289,27 +330,27 @@ io.on('connection', (socket) => {
             winners = topCandidates;
         }
 
-        // 4. 勝者の最大倍率を取得
         const winnerMult = winners[0] && winners[0].multiplier > 0 ? winners[0].multiplier : 1;
 
-        // 5. 敗者からの追加倍率徴収（シゴロやゾロ目などの倍率に応じてポットが肥大化する）
         evaluated.forEach(e => {
             const isWinner = winners.some(w => w.player.id === e.player.id);
             if (!isWinner && winnerMult > 1) {
                 const extra = e.player.bet * (winnerMult - 1);
                 e.player.chips -= extra;
                 e.player.chipDiff -= extra;
-                totalPot += extra; // 敗者からの追加徴収をポットに全額上乗せ
+                totalPot += extra;
             }
         });
 
-        // 6. ポットの分配（勝者で山分け）
         const share = Math.floor(totalPot / winners.length);
 
         winners.forEach(w => {
             w.player.chips += share;
             w.player.chipDiff += share;
         });
+
+        // 終了後に称号を強制適用
+        applyForcedTitles(room);
 
         room.roundSummary = {
             winnerNames: winners.map(w => `${w.player.name} (${w.player.lastResult.name})`).join(', '),
@@ -319,7 +360,9 @@ io.on('connection', (socket) => {
                 dice: p.lastDice,
                 resultName: p.lastResult ? p.lastResult.name : '目なし',
                 diff: p.chipDiff,
-                totalChips: p.chips
+                totalChips: p.chips,
+                title: p.title,
+                titleColor: p.titleColor
             }))
         };
     }
