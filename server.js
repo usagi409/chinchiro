@@ -48,6 +48,7 @@ io.on('connection', (socket) => {
         rooms[roomId] = {
             host: socket.id,
             gameMaster: socket.id,
+            minBet: 100, // 胴元が設定する最低賭け金
             currentTurnIndex: 0,
             turnsPlayed: 0,
             players: [{
@@ -58,13 +59,14 @@ io.on('connection', (socket) => {
                 failCount: 0,
                 bet: bet !== undefined ? parseInt(bet) || 100 : 100,
                 lastDice: null,
-                lastResult: null
+                lastResult: null,
+                chipDiff: 0
             }],
             status: 'waiting'
         };
 
         socket.join(roomId);
-        socket.emit('room-created', { roomId, players: rooms[roomId].players, gameMaster: rooms[roomId].gameMaster });
+        socket.emit('room-created', { roomId, players: rooms[roomId].players, gameMaster: rooms[roomId].gameMaster, minBet: rooms[roomId].minBet });
     });
 
     socket.on('join-room', ({ roomId, userName, wallet, bet }) => {
@@ -82,20 +84,23 @@ io.on('connection', (socket) => {
             return;
         }
 
+        const userBet = Math.max(room.minBet, parseInt(bet) || room.minBet);
+
         room.players.push({
             id: socket.id,
             name: userName,
             chips: wallet !== undefined ? wallet : 1000,
             role: 'guest',
             failCount: 0,
-            bet: bet !== undefined ? parseInt(bet) || 100 : 100,
+            bet: userBet,
             lastDice: null,
-            lastResult: null
+            lastResult: null,
+            chipDiff: 0
         });
 
         socket.join(roomId);
-        io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster });
-        socket.emit('joined', { roomId, players: room.players, gameMaster: room.gameMaster });
+        io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
+        socket.emit('joined', { roomId, players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
     });
 
     socket.on('update-bet', ({ roomId, bet }) => {
@@ -103,9 +108,25 @@ io.on('connection', (socket) => {
         if (!room || room.status === 'playing') return;
         const player = room.players.find(p => p.id === socket.id);
         if (player) {
-            player.bet = Math.max(1, parseInt(bet) || 100);
-            io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster });
+            const requestedBet = parseInt(bet) || room.minBet;
+            player.bet = Math.max(room.minBet, requestedBet);
+            io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
         }
+    });
+
+    socket.on('update-min-bet', ({ roomId, minBet }) => {
+        const room = rooms[roomId];
+        if (!room || room.host !== socket.id || room.status === 'playing') return;
+        
+        room.minBet = Math.max(1, parseInt(minBet) || 100);
+        // 全員の掛け金が新しい最低賭け金を下回っていたら引き上げる
+        room.players.forEach(p => {
+            if (p.bet < room.minBet) {
+                p.bet = room.minBet;
+            }
+        });
+
+        io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
     });
 
     socket.on('set-game-master', ({ roomId, targetSocketId }) => {
@@ -115,7 +136,7 @@ io.on('connection', (socket) => {
         const target = room.players.find(p => p.id === targetSocketId);
         if (target) {
             room.gameMaster = targetSocketId;
-            io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster });
+            io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
         }
     });
 
@@ -137,7 +158,8 @@ io.on('connection', (socket) => {
             p.failCount = 0;
             p.lastDice = null;
             p.lastResult = null;
-            p.chips -= p.bet; // 各自の任意の掛け金を徴収
+            p.chipDiff = -p.bet; // 初回拠出分
+            p.chips -= p.bet; 
         });
 
         io.to(roomId).emit('game-started', {
@@ -165,7 +187,6 @@ io.on('connection', (socket) => {
 
         const result = judgeChinchiro(dice);
 
-        // 目なしの場合の処理（3回未満ならターンを進めずに再挑戦）
         if (result.rank === 2) {
             currentPlayer.failCount = (currentPlayer.failCount || 0) + 1;
             
@@ -185,15 +206,12 @@ io.on('connection', (socket) => {
                 });
                 return;
             }
-            // 3回目到達時は目なし確定として次に進む
         }
 
-        // 目が確定（または3回目目なし）
         currentPlayer.failCount = currentPlayer.failCount || 0;
         currentPlayer.lastDice = dice;
         currentPlayer.lastResult = result;
 
-        // 次のプレイヤーへターン進行
         room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
         room.turnsPlayed++;
 
@@ -219,7 +237,6 @@ io.on('connection', (socket) => {
         });
     });
 
-    // 全員終了時の総取り・精算ロジック
     function processGameResults(room) {
         const evaluated = room.players.map(p => {
             const r = p.lastResult || { rank: 2, name: '目なし', multiplier: 0, score: 0 };
@@ -263,6 +280,7 @@ io.on('connection', (socket) => {
             if (e.isHifumi) {
                 const penalty = e.player.bet * 2;
                 e.player.chips -= penalty;
+                e.player.chipDiff -= penalty;
             }
         });
 
@@ -275,6 +293,7 @@ io.on('connection', (socket) => {
             if (!isWinner && winnerMult > 1) {
                 const extra = e.player.bet * (winnerMult - 1);
                 e.player.chips -= extra;
+                e.player.chipDiff -= extra;
                 additionalCollected += extra;
             }
         });
@@ -284,11 +303,19 @@ io.on('connection', (socket) => {
 
         winners.forEach(w => {
             w.player.chips += share;
+            w.player.chipDiff += share;
         });
 
         room.roundSummary = {
             winnerNames: winners.map(w => `${w.player.name} (${w.player.lastResult.name})`).join(', '),
-            totalPot: finalPot
+            totalPot: finalPot,
+            resultsDetail: room.players.map(p => ({
+                name: p.name,
+                dice: p.lastDice,
+                resultName: p.lastResult ? p.lastResult.name : '目なし',
+                diff: p.chipDiff,
+                totalChips: p.chips
+            }))
         };
     }
 
@@ -313,7 +340,7 @@ io.on('connection', (socket) => {
                 if (room.currentTurnIndex >= room.players.length) {
                     room.currentTurnIndex = 0;
                 }
-                io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster });
+                io.to(roomId).emit('update-room', { players: room.players, gameMaster: room.gameMaster, minBet: room.minBet });
             }
         }
     });
