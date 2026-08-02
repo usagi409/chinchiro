@@ -11,7 +11,6 @@ const io = new Server(server, {
     }
 });
 
-// CORSの防壁を突破して全方向からのアクセスを許可するミドルウェア
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
@@ -20,7 +19,6 @@ app.use((req, res, next) => {
 
 const rooms = {};
 
-// Renderスリープ対策のヘルスチェック用
 app.get('/ping', (req, res) => {
     res.status(200).send('pong');
 });
@@ -57,16 +55,17 @@ function applyForcedTitles(room) {
             p.isForcedTitle = true;
             p.titleColor = '#ff3366';
             if (p.chips <= -50000) {
-                p.title = '[臓器の未来を担保にした男]';
+                p.forcedTitle = '[臓器の未来を担保にした男]';
             } else if (p.chips <= -10000) {
-                p.title = '[闇金の優良顧客]';
+                p.forcedTitle = '[闇金の優良顧客]';
             } else if (p.chips <= -1000) {
-                p.title = '[カタギ崩れ]';
+                p.forcedTitle = '[カタギ崩れ]';
             } else {
-                p.title = '[借金初心者]';
+                p.forcedTitle = '[借金初心者]';
             }
         } else {
             p.isForcedTitle = false;
+            p.forcedTitle = null;
         }
     });
 }
@@ -94,9 +93,10 @@ io.on('connection', (socket) => {
                 lastDice: null,
                 lastResult: null,
                 chipDiff: 0,
-                title: initialChips < 0 ? '[借金初心者]' : (title || ''),
-                titleColor: initialChips < 0 ? '#ff3366' : (titleColor || '#ffcc00'),
-                isForcedTitle: initialChips < 0
+                title: title || '',
+                titleColor: titleColor || '#ffcc00',
+                isForcedTitle: false,
+                forcedTitle: null
             }],
             status: 'waiting'
         };
@@ -134,9 +134,10 @@ io.on('connection', (socket) => {
             lastDice: null,
             lastResult: null,
             chipDiff: 0,
-            title: initialChips < 0 ? '[借金初心者]' : (title || ''),
-            titleColor: initialChips < 0 ? '#ff3366' : (titleColor || '#ffcc00'),
-            isForcedTitle: initialChips < 0
+            title: title || '',
+            titleColor: titleColor || '#ffcc00',
+            isForcedTitle: false,
+            forcedTitle: null
         });
         applyForcedTitles(room);
 
@@ -371,7 +372,7 @@ io.on('connection', (socket) => {
                 resultName: p.lastResult ? p.lastResult.name : '目なし',
                 diff: p.chipDiff,
                 totalChips: p.chips,
-                title: p.title,
+                title: p.isForcedTitle ? p.forcedTitle : p.title,
                 titleColor: p.titleColor
             }))
         };
