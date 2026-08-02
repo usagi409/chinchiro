@@ -215,7 +215,7 @@ io.on('connection', (socket) => {
             p.lastResult = null;
             p.chipDiff = -p.bet;
             p.chips -= p.bet;
-            room.totalPot += p.bet; // ベットをポットに集約
+            room.totalPot += p.bet;
         });
 
         applyForcedTitles(room);
@@ -270,19 +270,24 @@ io.on('connection', (socket) => {
         currentPlayer.lastDice = dice;
         currentPlayer.lastResult = result;
 
-        // --- 賭け金に影響のある目が出たときの即時変動処理 ---
+        // --- 修正された即時変動処理（他のプレイヤーからエネルギーを回収する反応） ---
         if (result.rank === 1) {
-            // ヒフミ：追加ペナルティを即時徴収
+            // ヒフミ：自分の賭け金を2倍（自分にペナルティ追加）
             const penalty = currentPlayer.bet;
             currentPlayer.chips -= penalty;
             currentPlayer.chipDiff -= penalty;
             room.totalPot += penalty;
         } else if (result.multiplier > 1) {
-            // 高倍率の目（シゴロ、ゾロ目、ピンゾロ等）：倍率に応じた追加賭け金の変動・没収または追加拠出
-            const extra = currentPlayer.bet * (result.multiplier - 1);
-            currentPlayer.chips -= extra;
-            currentPlayer.chipDiff -= extra;
-            room.totalPot += extra;
+            // シゴロ(2倍)、ゾロ目(3倍)、ピンゾロ(5倍)：他のプレイヤー全員から倍率に応じた額を没収しポットに加算
+            const multi = result.multiplier;
+            room.players.forEach(p => {
+                if (p.id !== currentPlayer.id) {
+                    const extra = p.bet * (multi - 1);
+                    p.chips -= extra;
+                    p.chipDiff -= extra;
+                    room.totalPot += extra;
+                }
+            });
         }
 
         room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
@@ -349,7 +354,6 @@ io.on('connection', (socket) => {
             winners = topCandidates;
         }
 
-        // --- ゲーム終了時は総取りポットの配分（総取り処理）のみ行う ---
         const share = Math.floor(room.totalPot / winners.length);
 
         winners.forEach(w => {
