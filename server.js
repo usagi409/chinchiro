@@ -11,6 +11,13 @@ const io = new Server(server, {
     }
 });
 
+// CORSの防壁を突破して全方向からのアクセスを許可するミドルウェア
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    next();
+});
+
 const rooms = {};
 
 // Renderスリープ対策のヘルスチェック用
