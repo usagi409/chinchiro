@@ -17,19 +17,15 @@ const rooms = {};
 function judgeChinchiro(dice) {
     const sorted = [...dice].sort((a, b) => a - b);
     
-    // ピンゾロ (1-1-1)
     if (sorted[0] === 1 && sorted[1] === 1 && sorted[2] === 1) {
         return { rank: 5, name: 'ピンゾロ (5倍)', multiplier: 5, score: 100 };
     }
-    // ゾロ目 (2-2-2 ~ 6-6-6)
     if (sorted[0] === sorted[1] && sorted[1] === sorted[2]) {
         return { rank: 4, name: `${sorted[0]}のゾロ目 (3倍)`, multiplier: 3, score: 50 + sorted[0] };
     }
-    // シゴロ (4-5-6)
     if (sorted[0] === 4 && sorted[1] === 5 && sorted[2] === 6) {
         return { rank: 3, name: 'シゴロ (2倍)', multiplier: 2, score: 40 };
     }
-    // ヒフミ (1-2-3)
     if (sorted[0] === 1 && sorted[1] === 2 && sorted[2] === 3) {
         return { rank: -1, name: 'ヒフミ (2倍負け)', multiplier: 2, score: -10 };
     }
@@ -40,11 +36,9 @@ function judgeChinchiro(dice) {
         return { rank: 1, name: `${eye}の目 (1倍)`, multiplier: 1, score: eye };
     }
     
-    // 目なし
     return { rank: 0, name: '目なし (やり直し)', multiplier: 0, score: 0 };
 }
 
-// 親と子の勝負判定
 function battleChinchiro(playerResult, dealerResult) {
     if (playerResult.rank === -1) return 'lose';
     if (dealerResult.rank === -1) return 'win';
@@ -68,11 +62,13 @@ io.on('connection', (socket) => {
             host: socket.id,
             gameMaster: socket.id,
             currentTurnIndex: 0,
+            turnsPlayed: 0,
             players: [{
                 id: socket.id,
                 name: userName,
                 chips: wallet || 1000,
-                role: 'host'
+                role: 'host',
+                failCount: 0
             }],
             status: 'waiting'
         };
@@ -100,7 +96,8 @@ io.on('connection', (socket) => {
             id: socket.id,
             name: userName,
             chips: wallet || 1000,
-            role: 'guest'
+            role: 'guest',
+            failCount: 0
         });
 
         socket.join(roomId);
@@ -131,6 +128,8 @@ io.on('connection', (socket) => {
         room.status = 'playing';
         const gmIndex = room.players.findIndex(p => p.id === room.gameMaster);
         room.currentTurnIndex = gmIndex !== -1 ? gmIndex : 0;
+        room.turnsPlayed = 0;
+        room.players.forEach(p => p.failCount = 0);
 
         io.to(roomId).emit('game-started', {
             currentTurnId: room.players[room.currentTurnIndex].id,
@@ -160,10 +159,51 @@ io.on('connection', (socket) => {
         ];
 
         const result = judgeChinchiro(dice);
-        console.log(`[部屋 ${roomId}] ${currentPlayer.name} の出目: [${dice.join(', ')}] -> 判定: ${result.name} (rank: ${result.rank})`);
 
-        // 【目なしの場合の処理】：ターンを進めず、同じプレイヤーにもう一度振らせる
+        // 目なしの場合の処理
         if (result.rank === 0) {
+            currentPlayer.failCount = (currentPlayer.failCount || 0) + 1;
+            
+            // 目なし3回で強制的にペナルティ（負け）扱いにして次に進める
+            if (currentPlayer.failCount >= 3) {
+                currentPlayer.failCount = 0;
+                const dealerPlayer = room.players.find(p => p.id === room.gameMaster);
+                const deltaChips = bet; // 目なし3回は1倍分の負け
+                
+                currentPlayer.chips -= deltaChips;
+                if (dealerPlayer && currentPlayer.id !== dealerPlayer.id) {
+                    dealerPlayer.chips += deltaChips;
+                }
+                if (currentPlayer.chips < 0) currentPlayer.chips = 0;
+
+                // 次のプレイヤーへターン進行
+                room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+                room.turnsPlayed++;
+
+                const isFinished = room.turnsPlayed >= room.players.length;
+                if (isFinished) {
+                    room.status = 'waiting';
+                }
+
+                const nextPlayer = isFinished ? null : room.players[room.currentTurnIndex];
+
+                io.to(roomId).emit('dice-result', {
+                    playerName: currentPlayer.name,
+                    dice,
+                    result: { rank: 0, name: '目なし3回 (ペナルティ負け)' },
+                    isRetry: false,
+                    isPenalty: true,
+                    battleResult: 'lose',
+                    deltaChips,
+                    isFinished,
+                    nextTurnId: nextPlayer ? nextPlayer.id : null,
+                    nextTurnName: nextPlayer ? nextPlayer.name : null,
+                    players: room.players
+                });
+                return;
+            }
+
+            // 通常の目なし（やり直し）
             io.to(roomId).emit('dice-result', {
                 playerName: currentPlayer.name,
                 dice,
@@ -176,10 +216,19 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // 親（gameMaster）自身のターンの場合
+        // 目が出たのでfailCountリセット
+        currentPlayer.failCount = 0;
+
+        // 親自身のターンの場合
         if (currentPlayer.id === room.gameMaster) {
             room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-            const nextPlayer = room.players[room.currentTurnIndex];
+            room.turnsPlayed++;
+
+            const isFinished = room.turnsPlayed >= room.players.length;
+            if (isFinished) {
+                room.status = 'waiting';
+            }
+            const nextPlayer = isFinished ? null : room.players[room.currentTurnIndex];
 
             io.to(roomId).emit('dice-result', {
                 playerName: currentPlayer.name,
@@ -187,14 +236,15 @@ io.on('connection', (socket) => {
                 result,
                 isRetry: false,
                 isDealerTurn: true,
-                nextTurnId: nextPlayer.id,
-                nextTurnName: nextPlayer.name,
+                isFinished,
+                nextTurnId: nextPlayer ? nextPlayer.id : null,
+                nextTurnName: nextPlayer ? nextPlayer.name : null,
                 players: room.players
             });
             return;
         }
 
-        // 子のターンの場合：親の目を自動生成して勝負
+        // 子のターンの場合：親と勝負
         const dealerDice = [
             Math.floor(Math.random() * 6) + 1,
             Math.floor(Math.random() * 6) + 1,
@@ -228,7 +278,13 @@ io.on('connection', (socket) => {
 
         // 次のプレイヤーへターン進行
         room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-        const nextPlayer = room.players[room.currentTurnIndex];
+        room.turnsPlayed++;
+
+        const isFinished = room.turnsPlayed >= room.players.length;
+        if (isFinished) {
+            room.status = 'waiting';
+        }
+        const nextPlayer = isFinished ? null : room.players[room.currentTurnIndex];
 
         io.to(roomId).emit('dice-result', {
             playerName: currentPlayer.name,
@@ -240,8 +296,9 @@ io.on('connection', (socket) => {
             deltaChips,
             isRetry: false,
             isDealerTurn: false,
-            nextTurnId: nextPlayer.id,
-            nextTurnName: nextPlayer.name,
+            isFinished,
+            nextTurnId: nextPlayer ? nextPlayer.id : null,
+            nextTurnName: nextPlayer ? nextPlayer.name : null,
             players: room.players
         });
     });
