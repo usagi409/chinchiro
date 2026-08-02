@@ -13,30 +13,43 @@ const io = new Server(server, {
 
 const rooms = {};
 
-// チンチロの役判定ロジック
+// チンチロの役判定ロジック（正しい序列）
+// 1. ピンゾロ (1-1-1)
+// 2. シゴロ (4-5-6)
+// 3. アラシ (2~6のゾロ目、数字が大きい方が強い)
+// 4. nの目 (通常の目、数字が大きい方が強い)
+// 5. 目なし (やり直し。3回で目なし固定)
+// 6. ヒフミ (1-2-3)
 function judgeChinchiro(dice) {
     const sorted = [...dice].sort((a, b) => a - b);
     
+    // ピンゾロ (5倍)
     if (sorted[0] === 1 && sorted[1] === 1 && sorted[2] === 1) {
-        return { rank: 5, name: 'ピンゾロ (5倍)', multiplier: 5, score: 100 };
+        return { rank: 6, name: 'ピンゾロ (5倍)', multiplier: 5, score: 100 };
     }
+    // シゴロ (2倍)
+    if (sorted[0] === 4 && sorted[1] === 5 && sorted[2] === 6) {
+        return { rank: 5, name: 'シゴロ (2倍)', multiplier: 2, score: 40 };
+    }
+    // アラシ (ゾロ目 2~6) -> 3倍、数字が大きい方が強い
     if (sorted[0] === sorted[1] && sorted[1] === sorted[2]) {
         return { rank: 4, name: `${sorted[0]}のゾロ目 (3倍)`, multiplier: 3, score: 50 + sorted[0] };
     }
-    if (sorted[0] === 4 && sorted[1] === 5 && sorted[2] === 6) {
-        return { rank: 3, name: 'シゴロ (2倍)', multiplier: 2, score: 40 };
-    }
-    if (sorted[0] === 1 && sorted[1] === 2 && sorted[2] === 3) {
-        return { rank: -1, name: 'ヒフミ (2倍負け)', multiplier: 2, score: -10 };
-    }
     
     const unique = [...new Set(sorted)];
+    // nの目 (通常の目) -> 1倍、出目の大きい方が強い
     if (unique.length === 2) {
         const eye = sorted.find(x => sorted.filter(v => v === x).length === 1);
-        return { rank: 1, name: `${eye}の目 (1倍)`, multiplier: 1, score: eye };
+        return { rank: 3, name: `${eye}の目 (1倍)`, multiplier: 1, score: eye };
     }
     
-    return { rank: 0, name: '目なし', multiplier: 0, score: -20 };
+    // ヒフミ (2倍負け)
+    if (sorted[0] === 1 && sorted[1] === 2 && sorted[2] === 3) {
+        return { rank: 1, name: 'ヒフミ (2倍負け)', multiplier: 2, score: -10 };
+    }
+    
+    // 目なし (やり直し)
+    return { rank: 2, name: '目なし', multiplier: 0, score: 0 };
 }
 
 io.on('connection', (socket) => {
@@ -55,7 +68,7 @@ io.on('connection', (socket) => {
                 chips: wallet !== undefined ? wallet : 1000,
                 role: 'host',
                 failCount: 0,
-                bet: 0,
+                bet: 100,
                 lastDice: null,
                 lastResult: null
             }],
@@ -87,7 +100,7 @@ io.on('connection', (socket) => {
             chips: wallet !== undefined ? wallet : 1000,
             role: 'guest',
             failCount: 0,
-            bet: 0,
+            bet: 100,
             lastDice: null,
             lastResult: null
         });
@@ -108,7 +121,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('start-game', ({ roomId }) => {
+    socket.on('start-game', ({ roomId, defaultBet }) => {
         const room = rooms[roomId];
         if (!room || room.host !== socket.id) return;
 
@@ -117,26 +130,30 @@ io.on('connection', (socket) => {
             return;
         }
 
+        const betAmount = parseInt(defaultBet) || 100;
+
         room.status = 'playing';
-        // 親（gameMaster）からターンを開始する
         const gmIndex = room.players.findIndex(p => p.id === room.gameMaster);
         room.currentTurnIndex = gmIndex !== -1 ? gmIndex : 0;
         room.turnsPlayed = 0;
         
         room.players.forEach(p => {
             p.failCount = 0;
-            p.bet = 0;
+            p.bet = betAmount;
             p.lastDice = null;
             p.lastResult = null;
+            // ラウンド開始時に全員から掛け金を徴収（マイナス＝借金も許容）
+            p.chips -= betAmount;
         });
 
         io.to(roomId).emit('game-started', {
             currentTurnId: room.players[room.currentTurnIndex].id,
-            gameMasterId: room.gameMaster
+            gameMasterId: room.gameMaster,
+            players: room.players
         });
     });
 
-    socket.on('roll-dice', ({ roomId, bet }) => {
+    socket.on('roll-dice', ({ roomId }) => {
         const room = rooms[roomId];
         if (!room || room.status !== 'playing') return;
 
@@ -145,13 +162,6 @@ io.on('connection', (socket) => {
             socket.emit('error-msg', 'あなたのターンではありません！');
             return;
         }
-
-        if (bet <= 0) {
-            socket.emit('error-msg', '有効なベット額ではありません');
-            return;
-        }
-
-        currentPlayer.bet = bet;
 
         const dice = [
             Math.floor(Math.random() * 6) + 1,
@@ -162,20 +172,18 @@ io.on('connection', (socket) => {
         const result = judgeChinchiro(dice);
 
         // 目なしの場合の処理
-        if (result.rank === 0) {
+        if (result.rank === 2) {
             currentPlayer.failCount = (currentPlayer.failCount || 0) + 1;
             
             // 3回目で目なし固定
             if (currentPlayer.failCount >= 3) {
                 currentPlayer.lastDice = dice;
                 currentPlayer.lastResult = result;
-                
-                // 次のプレイヤーへ進む
-                advanceTurn(room, socket, dice, result, false, false);
+                advanceTurn(room, socket, dice, result, false);
                 return;
             }
 
-            // 通常の目なし（やり直し）
+            // 通常の目なし（やり直し） -> 同じプレイヤーのままもう一度振らせる
             io.to(roomId).emit('dice-result', {
                 playerName: currentPlayer.name,
                 dice,
@@ -193,10 +201,10 @@ io.on('connection', (socket) => {
         currentPlayer.lastDice = dice;
         currentPlayer.lastResult = result;
 
-        advanceTurn(room, socket, dice, result, false, false);
+        advanceTurn(room, socket, dice, result, false);
     });
 
-    function advanceTurn(room, socket, dice, result, isRetry, isPenalty) {
+    function advanceTurn(room, socket, dice, result, isRetry) {
         const currentPlayer = room.players[room.currentTurnIndex];
         room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
         room.turnsPlayed++;
@@ -205,7 +213,6 @@ io.on('connection', (socket) => {
 
         if (isFinished) {
             room.status = 'waiting';
-            // 全員振り終わったので精算処理を実行
             processGameResults(room);
         }
 
@@ -226,16 +233,14 @@ io.on('connection', (socket) => {
 
     // 全員終了時の総取り・精算ロジック
     function processGameResults(room) {
-        // 各プレイヤーのランクとスコアを整理
-        // ヒフミ (-1) は目なし(0)より下とする
         const evaluated = room.players.map(p => {
-            const r = p.lastResult || { rank: -2, name: '未参加', multiplier: 1, score: -100 };
+            const r = p.lastResult || { rank: 2, name: '目なし', multiplier: 0, score: 0 };
             return {
                 player: p,
                 rank: r.rank,
                 score: r.score,
                 multiplier: r.multiplier,
-                isHifumi: r.rank === -1
+                isHifumi: r.rank === 1
             };
         });
 
@@ -251,69 +256,60 @@ io.on('connection', (socket) => {
             }
         });
 
-        // トップのプレイヤー候補を抽出
         let topCandidates = evaluated.filter(e => e.rank === maxRank && e.score === maxScore);
-
-        // ローカルルール適用：「被った場合は親が負け、子同士の被りは分け」
         let winners = [];
         const gmId = room.gameMaster;
 
+        // ローカルルール：「被った場合は親が負け、子同士の被りは分け」
         if (topCandidates.length > 1) {
-            // トップが複数いる場合
-            // 親が含まれているか確認
             const hasGm = topCandidates.some(e => e.player.id === gmId);
             if (hasGm) {
-                // 親が被った場合は親の負け -> 親を除外
                 winners = topCandidates.filter(e => e.player.id !== gmId);
-                // 除外した結果誰もいなくなったら（全員親で被った等の異常系）、残った中で再選定か子全員の勝ちとするが通常は子がいる
                 if (winners.length === 0) {
-                    winners = topCandidates.filter(e => e.player.id === gmId); // フォールバック
+                    winners = topCandidates.filter(e => e.player.id === gmId);
                 }
             } else {
-                // 子同士の被りは分け（全員勝ち）
                 winners = topCandidates;
             }
         } else {
             winners = topCandidates;
         }
 
-        // ヒフミを出したプレイヤーは自分の掛け金2倍の罰金
+        // ヒフミを出したプレイヤーは自分の掛け金2倍の罰金を追加徴収
         evaluated.forEach(e => {
             if (e.isHifumi) {
                 const penalty = e.player.bet * 2;
                 e.player.chips -= penalty;
-                e.netChange = (e.netChange || 0) - penalty;
             }
         });
 
-        // 総取りの精算
-        // 勝者（複数なら山分け）が、他の敗者から掛け金×倍率を受け取る
-        const winnerCount = winners.length;
-        let totalCollected = 0;
+        // ポット（全員の掛け金の総額）を計算
+        let totalPot = room.players.reduce((sum, p) => sum + p.bet, 0);
 
+        // シゴロやピンゾロなどの倍率に応じた追加ボーナス回収（敗者から徴収してポットに上乗せ、あるいは勝者へ直接配分）
+        // ここではシンプルに、勝者の倍率に応じて敗者から追加で巻き上げる
+        const winnerMult = winners[0] ? winners[0].multiplier : 1;
+        
+        let additionalCollected = 0;
         evaluated.forEach(e => {
             const isWinner = winners.some(w => w.player.id === e.player.id);
-            if (!isWinner) {
-                // 敗者の支払い：自分のベット額 × 勝者の倍率（複数いる場合は代表して最初の勝者の倍率、あるいはそれぞれの倍率）
-                const mult = winners[0].multiplier || 1;
-                const payAmount = e.player.bet * mult;
-                e.player.chips -= payAmount;
-                e.netChange = (e.netChange || 0) - payAmount;
-                totalCollected += payAmount;
+            if (!isWinner && winnerMult > 1) {
+                const extra = e.player.bet * (winnerMult - 1);
+                e.player.chips -= extra;
+                additionalCollected += extra;
             }
         });
 
-        // 勝者への配分
-        const share = Math.floor(totalCollected / winnerCount);
+        const finalPot = totalPot + additionalCollected;
+        const share = Math.floor(finalPot / winners.length);
+
         winners.forEach(w => {
             w.player.chips += share;
-            w.player.netChange = (w.player.netChange || 0) + share;
         });
 
         room.roundSummary = {
-            winners: winners.map(w => w.player.name),
             winnerNames: winners.map(w => `${w.player.name} (${w.player.lastResult.name})`).join(', '),
-            totalCollected
+            totalPot: finalPot
         };
     }
 
