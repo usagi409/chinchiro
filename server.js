@@ -1,5 +1,5 @@
 const express = require('express');
-const http = http = require('http');
+const http = require('http');
 const { Server } = require('socket.io');
 
 const app = express();
@@ -49,7 +49,8 @@ io.on('connection', (socket) => {
 
     // 部屋を作る
     socket.on('create-room', ({ userName, wallet }) => {
-        const roomId = Math.random().toString(36.substring(2, 7)).toUpperCase();
+        // 【修正箇所】カッコの位置を直しました
+        const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
         rooms[roomId] = {
             host: socket.id,
             players: [{
