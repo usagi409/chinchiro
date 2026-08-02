@@ -342,15 +342,38 @@ io.on('connection', (socket) => {
             winners = topCandidates;
         }
 
-        const winnerMult = winners[0] && winners[0].multiplier > 0 ? winners[0].multiplier : 1;
+        // シゴロ持ちとピンゾロ持ちの有無をチェック
+        const hasPinzoro = evaluated.some(e => e.rank === 6);
+        const hasShigoro = evaluated.some(e => e.rank === 5);
 
         evaluated.forEach(e => {
             const isWinner = winners.some(w => w.player.id === e.player.id);
-            if (!isWinner && winnerMult > 1) {
-                const extra = e.player.bet * (winnerMult - 1);
-                e.player.chips -= extra;
-                e.player.chipDiff -= extra;
-                totalPot += extra;
+            if (!isWinner) {
+                let penaltyMult = 1;
+                const isThisPinzoro = (e.rank === 6);
+                const isThisShigoro = (e.rank === 5);
+
+                if (hasPinzoro && hasShigoro) {
+                    // 地獄の合わせ技ロジック
+                    if (isThisPinzoro) {
+                        penaltyMult = 2; // ピンゾロ持ちはシゴロの余波で2倍
+                    } else if (isThisShigoro) {
+                        penaltyMult = 5; // シゴロ持ちはピンゾロの爆風で5倍
+                    } else {
+                        penaltyMult = 10; // 全く関係ない一般人は両方食らって10倍の極刑！
+                    }
+                } else {
+                    // 通常時
+                    const winnerMult = winners[0] && winners[0].multiplier > 0 ? winners[0].multiplier : 1;
+                    penaltyMult = winnerMult;
+                }
+
+                if (penaltyMult > 1) {
+                    const extra = e.player.bet * (penaltyMult - 1);
+                    e.player.chips -= extra;
+                    e.player.chipDiff -= extra;
+                    totalPot += extra;
+                }
             }
         });
 
