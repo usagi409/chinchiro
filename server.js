@@ -207,12 +207,14 @@ io.on('connection', (socket) => {
         room.currentTurnIndex = gmIndex !== -1 ? gmIndex : 0;
         room.turnsPlayed = 0;
         
+        room.totalPot = 0;
         room.players.forEach(p => {
             p.failCount = 0;
             p.lastDice = null;
             p.lastResult = null;
             p.chipDiff = -p.bet;
-            p.chips -= p.bet; 
+            p.chips -= p.bet;
+            room.totalPot += p.bet; // 全員の基本ベットをポットに集約
         });
 
         applyForcedTitles(room);
@@ -220,7 +222,8 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('game-started', {
             currentTurnId: room.players[room.currentTurnIndex].id,
             gameMasterId: room.gameMaster,
-            players: room.players
+            players: room.players,
+            totalPot: room.totalPot
         });
     });
 
@@ -257,7 +260,8 @@ io.on('connection', (socket) => {
                     isFinished: false,
                     nextTurnId: currentPlayer.id,
                     nextTurnName: currentPlayer.name,
-                    players: room.players
+                    players: room.players,
+                    totalPot: room.totalPot
                 });
                 return;
             }
@@ -266,6 +270,22 @@ io.on('connection', (socket) => {
         currentPlayer.failCount = currentPlayer.failCount || 0;
         currentPlayer.lastDice = dice;
         currentPlayer.lastResult = result;
+
+        // 【即時変動システム】出目に応じた即時ペナルティ・ボーナス処理
+        if (result.rank === 1) {
+            // ヒフミ：追加でベット分を即時没収（ポットに加算）
+            const penalty = currentPlayer.bet;
+            currentPlayer.chips -= penalty;
+            currentPlayer.chipDiff -= penalty;
+            room.totalPot += penalty;
+        } else if (result.multiplier > 1) {
+            // 高倍率役（シゴロ・ゾロ目・ピンゾロ）：倍率に応じた追加ボーナス分を即時ポットからor追加徴収
+            // ここでは簡易的に「倍率 - 1」分の追加ベットを即時ペナルティとしてポットに追加する形にするか、あるいは即時反映
+            const extra = currentPlayer.bet * (result.multiplier - 1);
+            currentPlayer.chips -= extra;
+            currentPlayer.chipDiff -= extra;
+            room.totalPot += extra;
+        }
 
         room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
         room.turnsPlayed++;
@@ -288,6 +308,7 @@ io.on('connection', (socket) => {
             nextTurnId: nextPlayer ? nextPlayer.id : null,
             nextTurnName: nextPlayer ? nextPlayer.name : null,
             players: room.players,
+            totalPot: room.totalPot,
             roundSummary: isFinished ? room.roundSummary : null
         });
     });
@@ -299,20 +320,8 @@ io.on('connection', (socket) => {
                 player: p,
                 rank: r.rank,
                 score: r.score,
-                multiplier: r.multiplier,
                 isHifumi: r.rank === 1
             };
-        });
-
-        let totalPot = room.players.reduce((sum, p) => sum + p.bet, 0);
-
-        evaluated.forEach(e => {
-            if (e.isHifumi) {
-                const extraPenalty = e.player.bet;
-                e.player.chips -= extraPenalty;
-                e.player.chipDiff -= extraPenalty;
-                totalPot += extraPenalty;
-            }
         });
 
         let maxRank = -999;
@@ -342,42 +351,8 @@ io.on('connection', (socket) => {
             winners = topCandidates;
         }
 
-        // シゴロ持ちとピンゾロ持ちの有無をチェック
-        const hasPinzoro = evaluated.some(e => e.rank === 6);
-        const hasShigoro = evaluated.some(e => e.rank === 5);
-
-        evaluated.forEach(e => {
-            const isWinner = winners.some(w => w.player.id === e.player.id);
-            if (!isWinner) {
-                let penaltyMult = 1;
-                const isThisPinzoro = (e.rank === 6);
-                const isThisShigoro = (e.rank === 5);
-
-                if (hasPinzoro && hasShigoro) {
-                    // 地獄の合わせ技ロジック
-                    if (isThisPinzoro) {
-                        penaltyMult = 2; // ピンゾロ持ちはシゴロの余波で2倍
-                    } else if (isThisShigoro) {
-                        penaltyMult = 5; // シゴロ持ちはピンゾロの爆風で5倍
-                    } else {
-                        penaltyMult = 10; // 全く関係ない一般人は両方食らって10倍の極刑！
-                    }
-                } else {
-                    // 通常時
-                    const winnerMult = winners[0] && winners[0].multiplier > 0 ? winners[0].multiplier : 1;
-                    penaltyMult = winnerMult;
-                }
-
-                if (penaltyMult > 1) {
-                    const extra = e.player.bet * (penaltyMult - 1);
-                    e.player.chips -= extra;
-                    e.player.chipDiff -= extra;
-                    totalPot += extra;
-                }
-            }
-        });
-
-        const share = Math.floor(totalPot / winners.length);
+        // ラウンド終了時のポット総取り分配
+        const share = Math.floor(room.totalPot / winners.length);
 
         winners.forEach(w => {
             w.player.chips += share;
@@ -387,8 +362,8 @@ io.on('connection', (socket) => {
         applyForcedTitles(room);
 
         room.roundSummary = {
-            winnerNames: winners.map(w => `${w.player.name} (${w.player.lastResult.name})`).join(', '),
-            totalPot: totalPot,
+            winnerNames: winners.map(w => `${w.player.name} (${w.player.player.lastResult.name})`).join(', '),
+            totalPot: room.totalPot,
             resultsDetail: room.players.map(p => ({
                 name: p.name,
                 dice: p.lastDice,
