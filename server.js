@@ -46,10 +46,10 @@ function judgeChinchiro(dice) {
 
 // 親と子の勝負判定
 function battleChinchiro(playerResult, dealerResult) {
-    if (playerResult.rank === -1) return 'lose'; // ヒフミは問答無用で負け
-    if (dealerResult.rank === -1) return 'win';   // 親がヒフミは子の勝ち
-    if (playerResult.rank === 5) return 'win';    // ピンゾロは勝ち
-    if (dealerResult.rank === 5) return 'lose';   // 親がピンゾロは負け
+    if (playerResult.rank === -1) return 'lose';
+    if (dealerResult.rank === -1) return 'win';
+    if (playerResult.rank === 5) return 'win';
+    if (dealerResult.rank === 5) return 'lose';
 
     if (playerResult.rank > dealerResult.rank) return 'win';
     if (playerResult.rank < dealerResult.rank) return 'lose';
@@ -160,6 +160,7 @@ io.on('connection', (socket) => {
         ];
 
         const result = judgeChinchiro(dice);
+        console.log(`[部屋 ${roomId}] ${currentPlayer.name} の出目: [${dice.join(', ')}] -> 判定: ${result.name} (rank: ${result.rank})`);
 
         // 【目なしの場合の処理】：ターンを進めず、同じプレイヤーにもう一度振らせる
         if (result.rank === 0) {
@@ -201,7 +202,6 @@ io.on('connection', (socket) => {
         ];
         const dealerResult = judgeChinchiro(dealerDice);
 
-        // 親が目なしの場合は子の勝ち扱いなど、必要に応じて調整（ここでは目なし同士なら親の負け、または引き分け処理）
         let battleResult = 'draw';
         if (dealerResult.rank === 0) {
             battleResult = 'win';
