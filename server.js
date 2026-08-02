@@ -36,21 +36,7 @@ function judgeChinchiro(dice) {
         return { rank: 1, name: `${eye}の目 (1倍)`, multiplier: 1, score: eye };
     }
     
-    return { rank: 0, name: '目なし (やり直し)', multiplier: 0, score: 0 };
-}
-
-function battleChinchiro(playerResult, dealerResult) {
-    if (playerResult.rank === -1) return 'lose';
-    if (dealerResult.rank === -1) return 'win';
-    if (playerResult.rank === 5) return 'win';
-    if (dealerResult.rank === 5) return 'lose';
-
-    if (playerResult.rank > dealerResult.rank) return 'win';
-    if (playerResult.rank < dealerResult.rank) return 'lose';
-
-    if (playerResult.score > dealerResult.score) return 'win';
-    if (playerResult.score < dealerResult.score) return 'lose';
-    return 'draw';
+    return { rank: 0, name: '目なし', multiplier: 0, score: -20 };
 }
 
 io.on('connection', (socket) => {
@@ -66,9 +52,12 @@ io.on('connection', (socket) => {
             players: [{
                 id: socket.id,
                 name: userName,
-                chips: wallet || 1000,
+                chips: wallet !== undefined ? wallet : 1000,
                 role: 'host',
-                failCount: 0
+                failCount: 0,
+                bet: 0,
+                lastDice: null,
+                lastResult: null
             }],
             status: 'waiting'
         };
@@ -95,9 +84,12 @@ io.on('connection', (socket) => {
         room.players.push({
             id: socket.id,
             name: userName,
-            chips: wallet || 1000,
+            chips: wallet !== undefined ? wallet : 1000,
             role: 'guest',
-            failCount: 0
+            failCount: 0,
+            bet: 0,
+            lastDice: null,
+            lastResult: null
         });
 
         socket.join(roomId);
@@ -126,10 +118,17 @@ io.on('connection', (socket) => {
         }
 
         room.status = 'playing';
+        // 親（gameMaster）からターンを開始する
         const gmIndex = room.players.findIndex(p => p.id === room.gameMaster);
         room.currentTurnIndex = gmIndex !== -1 ? gmIndex : 0;
         room.turnsPlayed = 0;
-        room.players.forEach(p => p.failCount = 0);
+        
+        room.players.forEach(p => {
+            p.failCount = 0;
+            p.bet = 0;
+            p.lastDice = null;
+            p.lastResult = null;
+        });
 
         io.to(roomId).emit('game-started', {
             currentTurnId: room.players[room.currentTurnIndex].id,
@@ -147,10 +146,12 @@ io.on('connection', (socket) => {
             return;
         }
 
-        if (bet <= 0 || bet > currentPlayer.chips) {
+        if (bet <= 0) {
             socket.emit('error-msg', '有効なベット額ではありません');
             return;
         }
+
+        currentPlayer.bet = bet;
 
         const dice = [
             Math.floor(Math.random() * 6) + 1,
@@ -164,42 +165,13 @@ io.on('connection', (socket) => {
         if (result.rank === 0) {
             currentPlayer.failCount = (currentPlayer.failCount || 0) + 1;
             
-            // 目なし3回で強制的にペナルティ（負け）扱いにして次に進める
+            // 3回目で目なし固定
             if (currentPlayer.failCount >= 3) {
-                currentPlayer.failCount = 0;
-                const dealerPlayer = room.players.find(p => p.id === room.gameMaster);
-                const deltaChips = bet; // 目なし3回は1倍分の負け
+                currentPlayer.lastDice = dice;
+                currentPlayer.lastResult = result;
                 
-                currentPlayer.chips -= deltaChips;
-                if (dealerPlayer && currentPlayer.id !== dealerPlayer.id) {
-                    dealerPlayer.chips += deltaChips;
-                }
-                if (currentPlayer.chips < 0) currentPlayer.chips = 0;
-
-                // 次のプレイヤーへターン進行
-                room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-                room.turnsPlayed++;
-
-                const isFinished = room.turnsPlayed >= room.players.length;
-                if (isFinished) {
-                    room.status = 'waiting';
-                }
-
-                const nextPlayer = isFinished ? null : room.players[room.currentTurnIndex];
-
-                io.to(roomId).emit('dice-result', {
-                    playerName: currentPlayer.name,
-                    dice,
-                    result: { rank: 0, name: '目なし3回 (ペナルティ負け)' },
-                    isRetry: false,
-                    isPenalty: true,
-                    battleResult: 'lose',
-                    deltaChips,
-                    isFinished,
-                    nextTurnId: nextPlayer ? nextPlayer.id : null,
-                    nextTurnName: nextPlayer ? nextPlayer.name : null,
-                    players: room.players
-                });
+                // 次のプレイヤーへ進む
+                advanceTurn(room, socket, dice, result, false, false);
                 return;
             }
 
@@ -216,92 +188,134 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // 目が出たのでfailCountリセット
+        // 目が出たので確定
         currentPlayer.failCount = 0;
+        currentPlayer.lastDice = dice;
+        currentPlayer.lastResult = result;
 
-        // 親自身のターンの場合
-        if (currentPlayer.id === room.gameMaster) {
-            room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-            room.turnsPlayed++;
+        advanceTurn(room, socket, dice, result, false, false);
+    });
 
-            const isFinished = room.turnsPlayed >= room.players.length;
-            if (isFinished) {
-                room.status = 'waiting';
-            }
-            const nextPlayer = isFinished ? null : room.players[room.currentTurnIndex];
-
-            io.to(roomId).emit('dice-result', {
-                playerName: currentPlayer.name,
-                dice,
-                result,
-                isRetry: false,
-                isDealerTurn: true,
-                isFinished,
-                nextTurnId: nextPlayer ? nextPlayer.id : null,
-                nextTurnName: nextPlayer ? nextPlayer.name : null,
-                players: room.players
-            });
-            return;
-        }
-
-        // 子のターンの場合：親と勝負
-        const dealerDice = [
-            Math.floor(Math.random() * 6) + 1,
-            Math.floor(Math.random() * 6) + 1,
-            Math.floor(Math.random() * 6) + 1
-        ];
-        const dealerResult = judgeChinchiro(dealerDice);
-
-        let battleResult = 'draw';
-        if (dealerResult.rank === 0) {
-            battleResult = 'win';
-        } else {
-            battleResult = battleChinchiro(result, dealerResult);
-        }
-
-        const multiplier = result.multiplier || 1;
-        let deltaChips = 0;
-        const dealerPlayer = room.players.find(p => p.id === room.gameMaster);
-
-        if (battleResult === 'win') {
-            deltaChips = bet * multiplier;
-            currentPlayer.chips += deltaChips;
-            if (dealerPlayer) dealerPlayer.chips -= deltaChips;
-        } else if (battleResult === 'lose') {
-            deltaChips = bet * multiplier;
-            currentPlayer.chips -= deltaChips;
-            if (dealerPlayer) dealerPlayer.chips += deltaChips;
-        }
-
-        if (currentPlayer.chips < 0) currentPlayer.chips = 0;
-        if (dealerPlayer && dealerPlayer.chips < 0) dealerPlayer.chips = 0;
-
-        // 次のプレイヤーへターン進行
+    function advanceTurn(room, socket, dice, result, isRetry, isPenalty) {
+        const currentPlayer = room.players[room.currentTurnIndex];
         room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
         room.turnsPlayed++;
 
         const isFinished = room.turnsPlayed >= room.players.length;
+
         if (isFinished) {
             room.status = 'waiting';
+            // 全員振り終わったので精算処理を実行
+            processGameResults(room);
         }
+
         const nextPlayer = isFinished ? null : room.players[room.currentTurnIndex];
 
         io.to(roomId).emit('dice-result', {
             playerName: currentPlayer.name,
             dice,
             result,
-            dealerDice,
-            dealerResult,
-            battleResult,
-            deltaChips,
-            isRetry: false,
-            isDealerTurn: false,
+            isRetry,
             isFinished,
             nextTurnId: nextPlayer ? nextPlayer.id : null,
             nextTurnName: nextPlayer ? nextPlayer.name : null,
-            players: room.players
+            players: room.players,
+            roundSummary: isFinished ? room.roundSummary : null
         });
-    });
+    }
+
+    // 全員終了時の総取り・精算ロジック
+    function processGameResults(room) {
+        // 各プレイヤーのランクとスコアを整理
+        // ヒフミ (-1) は目なし(0)より下とする
+        const evaluated = room.players.map(p => {
+            const r = p.lastResult || { rank: -2, name: '未参加', multiplier: 1, score: -100 };
+            return {
+                player: p,
+                rank: r.rank,
+                score: r.score,
+                multiplier: r.multiplier,
+                isHifumi: r.rank === -1
+            };
+        });
+
+        // 最強のランクとスコアを見つける
+        let maxRank = -999;
+        let maxScore = -999;
+        evaluated.forEach(e => {
+            if (e.rank > maxRank) {
+                maxRank = e.rank;
+                maxScore = e.score;
+            } else if (e.rank === maxRank && e.score > maxScore) {
+                maxScore = e.score;
+            }
+        });
+
+        // トップのプレイヤー候補を抽出
+        let topCandidates = evaluated.filter(e => e.rank === maxRank && e.score === maxScore);
+
+        // ローカルルール適用：「被った場合は親が負け、子同士の被りは分け」
+        let winners = [];
+        const gmId = room.gameMaster;
+
+        if (topCandidates.length > 1) {
+            // トップが複数いる場合
+            // 親が含まれているか確認
+            const hasGm = topCandidates.some(e => e.player.id === gmId);
+            if (hasGm) {
+                // 親が被った場合は親の負け -> 親を除外
+                winners = topCandidates.filter(e => e.player.id !== gmId);
+                // 除外した結果誰もいなくなったら（全員親で被った等の異常系）、残った中で再選定か子全員の勝ちとするが通常は子がいる
+                if (winners.length === 0) {
+                    winners = topCandidates.filter(e => e.player.id === gmId); // フォールバック
+                }
+            } else {
+                // 子同士の被りは分け（全員勝ち）
+                winners = topCandidates;
+            }
+        } else {
+            winners = topCandidates;
+        }
+
+        // ヒフミを出したプレイヤーは自分の掛け金2倍の罰金
+        evaluated.forEach(e => {
+            if (e.isHifumi) {
+                const penalty = e.player.bet * 2;
+                e.player.chips -= penalty;
+                e.netChange = (e.netChange || 0) - penalty;
+            }
+        });
+
+        // 総取りの精算
+        // 勝者（複数なら山分け）が、他の敗者から掛け金×倍率を受け取る
+        const winnerCount = winners.length;
+        let totalCollected = 0;
+
+        evaluated.forEach(e => {
+            const isWinner = winners.some(w => w.player.id === e.player.id);
+            if (!isWinner) {
+                // 敗者の支払い：自分のベット額 × 勝者の倍率（複数いる場合は代表して最初の勝者の倍率、あるいはそれぞれの倍率）
+                const mult = winners[0].multiplier || 1;
+                const payAmount = e.player.bet * mult;
+                e.player.chips -= payAmount;
+                e.netChange = (e.netChange || 0) - payAmount;
+                totalCollected += payAmount;
+            }
+        });
+
+        // 勝者への配分
+        const share = Math.floor(totalCollected / winnerCount);
+        winners.forEach(w => {
+            w.player.chips += share;
+            w.player.netChange = (w.player.netChange || 0) + share;
+        });
+
+        room.roundSummary = {
+            winners: winners.map(w => w.player.name),
+            winnerNames: winners.map(w => `${w.player.name} (${w.player.lastResult.name})`).join(', '),
+            totalCollected
+        };
+    }
 
     socket.on('disconnect', () => {
         for (const roomId in rooms) {
